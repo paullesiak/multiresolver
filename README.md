@@ -1,6 +1,6 @@
 # multiresolver
 
-Race multiple hostname resolvers and return the first successful answer or all answers
+Race multiple hostname resolvers and return the first successful answer (or collect all).
 
 - First-success: stop at the earliest valid result.
 - Gather-all: wait for all candidates and return every success.
@@ -30,16 +30,26 @@ func main() {
     ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
     defer cancel()
 
+    // First successful answer (single host)
     res, err := r.Resolve(ctx, "example.com")
     if err != nil {
         panic(err)
     }
     fmt.Printf("winner: %s addrs: %v\n", res.Source, res.Addrs)
 
+    // Or, gather all successes (single host)
     all, err := r.ResolveAll(ctx, "example.com")
     if err != nil {
         panic(err)
     }
     fmt.Printf("all: %+v\n", all)
 }
+```
+
+### Multiple hostnames
+
+Provide multiple equivalent hostnames and race across all resolvers and hosts:
+
+```go
+res, err := r.ResolveAny(ctx, []string{"svc-a.local", "svc-b.local", "svc-c.local"})
 ```

@@ -24,8 +24,12 @@ type Candidate struct {
 
 // Result captures the candidate that succeeded and the addresses it resolved.
 type Result struct {
+	// Host is the hostname that produced this result.
+	Host string
+	// Source is the candidate (resolver name) that resolved Host.
 	Source string
-	Addrs  []netip.Addr
+	// Addrs are the resolved addresses for Host.
+	Addrs []netip.Addr
 }
 
 // Observer receives lifecycle notifications for each candidate execution. Implementations can expose
@@ -142,6 +146,47 @@ func (r *Resolver) ResolveAll(ctx context.Context, host string) ([]Result, error
 	return nil, joinErrors(errs, nil)
 }
 
+// ResolveAny races all candidates across all provided hosts and returns the first
+// successful result. When hosts or candidates are empty, or when all lookups fail,
+// an error joined with ErrNoCandidates is returned.
+func (r *Resolver) ResolveAny(ctx context.Context, hosts []string) (Result, error) {
+	if len(r.candidates) == 0 || len(hosts) == 0 {
+		return Result{}, ErrNoCandidates
+	}
+
+	subCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	resultCh := make(chan Result, len(r.candidates)*len(hosts))
+	errCh := make(chan error, len(r.candidates)*len(hosts))
+
+	for _, h := range hosts {
+		host := h
+		for i := range r.candidates {
+			go r.runCandidate(subCtx, host, r.candidates[i], resultCh, errCh)
+		}
+	}
+
+	var errs []error
+	total := len(r.candidates) * len(hosts)
+	failed := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return Result{}, joinErrors(errs, ctx.Err())
+		case res := <-resultCh:
+			cancel()
+			return res, nil
+		case err := <-errCh:
+			errs = append(errs, err)
+			failed++
+			if failed == total {
+				return Result{}, joinErrors(errs, nil)
+			}
+		}
+	}
+}
+
 func (r *Resolver) runCandidate(ctx context.Context, host string, candidate Candidate, resultCh chan<- Result, errCh chan<- error) {
 	if candidate.Lookup == nil {
 		return
@@ -169,7 +214,7 @@ func (r *Resolver) runCandidate(ctx context.Context, host string, candidate Cand
 
 	copyAddrs := append([]netip.Addr(nil), addrs...)
 	r.notifySuccess(candidate.Name, copyAddrs)
-	r.safeSendResult(ctx, resultCh, Result{Source: candidate.Name, Addrs: copyAddrs})
+	r.safeSendResult(ctx, resultCh, Result{Host: host, Source: candidate.Name, Addrs: copyAddrs})
 }
 
 func (r *Resolver) safeSendResult(ctx context.Context, ch chan<- Result, res Result) {
