@@ -1,6 +1,6 @@
 module github.com/paullesiak/multiresolver
 
-go 1.24.2
+go 1.25
 
 require (
 	github.com/pion/mdns/v2 v2.0.7
