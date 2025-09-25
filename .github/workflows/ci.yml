@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit tests and coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache: true
+
+      - name: Tidy modules
+        run: go mod tidy
+
+      - name: Run unit tests
+        run: go test -v ./...
+
+      - name: Run race detector + coverage
+        run: |
+          go test -race -covermode=atomic -coverprofile=cover.out ./...
+
+      - name: Coverage summary
+        id: coverage
+        run: |
+          go tool cover -func=cover.out | tee coverage.txt
+          total=$(go tool cover -func=cover.out | awk '/^total:/ {print $3}')
+          echo "total=$total" >> "$GITHUB_OUTPUT"
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            cover.out
+            coverage.txt
+
+      - name: Add coverage to summary
+        run: |
+          echo "Total coverage: ${{ steps.coverage.outputs.total }}" >> $GITHUB_STEP_SUMMARY
