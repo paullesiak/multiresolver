@@ -122,10 +122,10 @@ func TestMDNSCandidate(t *testing.T) {
 	ctx := context.Background()
 	t.Run("returns address from query", func(t *testing.T) {
 		called := false
-		candidate := MDNS("mdns", WithMDNSQuery(func(ctx context.Context, host string) (netip.Addr, error) {
+		candidate := MDNSWithQuery("mdns", func(ctx context.Context, host string) (netip.Addr, error) {
 			called = true
 			return netip.MustParseAddr("192.168.1.5"), nil
-		}))
+		})
 		resolver := New(candidate)
 		res, err := resolver.Resolve(ctx, "printer.local")
 		require.True(t, called)
@@ -136,9 +136,9 @@ func TestMDNSCandidate(t *testing.T) {
 
 	t.Run("propagates query error", func(t *testing.T) {
 		errBoom := errors.New("boom")
-		candidate := MDNS("mdns", WithMDNSQuery(func(ctx context.Context, host string) (netip.Addr, error) {
+		candidate := MDNSWithQuery("mdns", func(ctx context.Context, host string) (netip.Addr, error) {
 			return netip.Addr{}, errBoom
-		}))
+		})
 		resolver := New(candidate)
 		_, err := resolver.Resolve(ctx, "printer.local")
 		require.Error(t, err)
@@ -147,9 +147,9 @@ func TestMDNSCandidate(t *testing.T) {
 	})
 
 	t.Run("rejects zero address", func(t *testing.T) {
-		candidate := MDNS("mdns", WithMDNSQuery(func(ctx context.Context, host string) (netip.Addr, error) {
+		candidate := MDNSWithQuery("mdns", func(ctx context.Context, host string) (netip.Addr, error) {
 			return netip.Addr{}, nil
-		}))
+		})
 		resolver := New(candidate)
 		_, err := resolver.Resolve(ctx, "printer.local")
 		require.Error(t, err)

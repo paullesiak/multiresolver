@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"sync"
 	"time"
 )
 
@@ -71,63 +70,29 @@ func (r *Resolver) Resolve(ctx context.Context, host string) (Result, error) {
 		return Result{}, ErrNoCandidates
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
+	subCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	type outcome struct {
-		result Result
-		err    error
-	}
+	resultCh := make(chan Result, len(r.candidates))
+	errCh := make(chan error, len(r.candidates))
 
-	outcomes := make(chan outcome, len(r.candidates))
-	var wg sync.WaitGroup
-	for _, candidate := range r.candidates {
-		c := candidate
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			r.notifyStart(c.Name)
-			addrs, err := c.Lookup(ctx, host)
-			if err != nil {
-				r.notifyError(c.Name, err)
-				outcomes <- outcome{err: wrapCandidateError(c.Name, err)}
-				return
-			}
-			if len(addrs) == 0 {
-				emptyErr := errors.New("no addresses returned")
-				r.notifyError(c.Name, emptyErr)
-				outcomes <- outcome{err: wrapCandidateError(c.Name, emptyErr)}
-				return
-			}
-			copyAddrs := append([]netip.Addr(nil), addrs...)
-			r.notifySuccess(c.Name, copyAddrs)
-			outcomes <- outcome{result: Result{Source: c.Name, Addrs: copyAddrs}}
-		}()
+	for i := range r.candidates {
+		go r.runCandidate(subCtx, host, r.candidates[i], resultCh, errCh)
 	}
-
-	go func() {
-		wg.Wait()
-		close(outcomes)
-	}()
 
 	var errs []error
 	for {
 		select {
 		case <-ctx.Done():
 			return Result{}, joinErrors(errs, ctx.Err())
-		case outcome, ok := <-outcomes:
-			if !ok {
+		case res := <-resultCh:
+			cancel()
+			return res, nil
+		case err := <-errCh:
+			errs = append(errs, err)
+			if len(errs) == len(r.candidates) {
 				return Result{}, joinErrors(errs, nil)
 			}
-			if outcome.err != nil {
-				errs = append(errs, outcome.err)
-				if len(errs) == len(r.candidates) {
-					return Result{}, joinErrors(errs, nil)
-				}
-				continue
-			}
-			cancel()
-			return outcome.result, nil
 		}
 	}
 }
@@ -140,60 +105,88 @@ func (r *Resolver) ResolveAll(ctx context.Context, host string) ([]Result, error
 		return nil, ErrNoCandidates
 	}
 
-	type outcome struct {
-		result Result
-		err    error
-	}
+	subCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	outcomes := make(chan outcome, len(r.candidates))
-	var wg sync.WaitGroup
-	for _, candidate := range r.candidates {
-		c := candidate
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			r.notifyStart(c.Name)
-			addrs, err := c.Lookup(ctx, host)
-			if err != nil {
-				r.notifyError(c.Name, err)
-				outcomes <- outcome{err: wrapCandidateError(c.Name, err)}
-				return
-			}
-			if len(addrs) == 0 {
-				emptyErr := errors.New("no addresses returned")
-				r.notifyError(c.Name, emptyErr)
-				outcomes <- outcome{err: wrapCandidateError(c.Name, emptyErr)}
-				return
-			}
-			copyAddrs := append([]netip.Addr(nil), addrs...)
-			r.notifySuccess(c.Name, copyAddrs)
-			outcomes <- outcome{result: Result{Source: c.Name, Addrs: copyAddrs}}
-		}()
-	}
+	resultCh := make(chan Result, len(r.candidates))
+	errCh := make(chan error, len(r.candidates))
 
-	go func() {
-		wg.Wait()
-		close(outcomes)
-	}()
+	for i := range r.candidates {
+		go r.runCandidate(subCtx, host, r.candidates[i], resultCh, errCh)
+	}
 
 	var (
-		results []Result
-		errs    []error
+		results    []Result
+		errs       []error
+		finished   int
+		targetRuns = len(r.candidates)
 	)
 
-	for outcome := range outcomes {
-		if outcome.err != nil {
-			errs = append(errs, outcome.err)
-			continue
+	for finished < targetRuns {
+		select {
+		case <-ctx.Done():
+			return nil, joinErrors(errs, ctx.Err())
+		case res := <-resultCh:
+			results = append(results, res)
+			finished++
+		case err := <-errCh:
+			errs = append(errs, err)
+			finished++
 		}
-		results = append(results, outcome.result)
 	}
 
 	if len(results) > 0 {
 		return results, nil
 	}
 
-	return nil, joinErrors(errs, ctx.Err())
+	return nil, joinErrors(errs, nil)
+}
+
+func (r *Resolver) runCandidate(ctx context.Context, host string, candidate Candidate, resultCh chan<- Result, errCh chan<- error) {
+	if candidate.Lookup == nil {
+		return
+	}
+
+	if ctx.Err() != nil {
+		return
+	}
+
+	r.notifyStart(candidate.Name)
+
+	addrs, err := candidate.Lookup(ctx, host)
+	if err != nil {
+		r.notifyError(candidate.Name, err)
+		r.safeSendError(ctx, errCh, wrapCandidateError(candidate.Name, err))
+		return
+	}
+
+	if len(addrs) == 0 {
+		emptyErr := errors.New("no addresses returned")
+		r.notifyError(candidate.Name, emptyErr)
+		r.safeSendError(ctx, errCh, wrapCandidateError(candidate.Name, emptyErr))
+		return
+	}
+
+	copyAddrs := append([]netip.Addr(nil), addrs...)
+	r.notifySuccess(candidate.Name, copyAddrs)
+	r.safeSendResult(ctx, resultCh, Result{Source: candidate.Name, Addrs: copyAddrs})
+}
+
+func (r *Resolver) safeSendResult(ctx context.Context, ch chan<- Result, res Result) {
+	select {
+	case ch <- res:
+	case <-ctx.Done():
+	}
+}
+
+func (r *Resolver) safeSendError(ctx context.Context, ch chan<- error, err error) {
+	if err == nil {
+		return
+	}
+	select {
+	case ch <- err:
+	case <-ctx.Done():
+	}
 }
 
 // System returns a candidate backed by the process-wide default DNS resolver.
